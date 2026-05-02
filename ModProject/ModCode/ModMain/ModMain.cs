@@ -433,27 +433,19 @@ namespace MOD_nV039M
 
         private static string GetGameMonthKey()
         {
-            foreach (string path in new[]
+            object run = null;
+            try { run = g.world.run; } catch { }
+            if (run != null)
             {
-                "world.run.roundMonth", "world.run.gameTime", "world.run.curMonth", "world.run.month", "world.run.round"
-            })
-            {
-                object v = GetPathValue(g, path);
-                if (v != null) return v.ToString();
+                foreach (string name in new[] { "roundMonth", "gameTime", "curMonth", "month", "round" })
+                {
+                    object v = GetMemberValue(run, name);
+                    if (v != null) return v.ToString();
+                }
             }
-            return DateTime.Now.ToString("yyyyMMddHHmm");
-        }
 
-        private static object GetPathValue(object root, string path)
-        {
-            object cur = root;
-            string[] parts = path.Split('.');
-            for (int i = 0; i < parts.Length; i++)
-            {
-                cur = GetMemberValue(cur, parts[i]);
-                if (cur == null) return null;
-            }
-            return cur;
+            // 找不到遊戲月份時才用真實時間備援；這只會影響「多久整編一次」，不影響排序內容。
+            return DateTime.Now.ToString("yyyyMMddHHmm");
         }
 
         private static void LogTopMembers(List<MemberInfoEx> members, int count)
