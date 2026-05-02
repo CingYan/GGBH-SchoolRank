@@ -204,7 +204,8 @@ namespace MOD_SNs4Ii
                 var enumerator = g.world.unit.allUnit.GetEnumerator();
                 while (enumerator.MoveNext())
                 {
-                    WorldUnitBase unit = enumerator.Current;
+                    object current = enumerator.Current;
+                    WorldUnitBase unit = ExtractWorldUnit(current);
                     if (unit == null) continue;
 
                     string uid = GetUnitId(unit);
@@ -429,14 +430,46 @@ namespace MOD_SNs4Ii
                 object v = GetMemberValue(ud, name);
                 if (v is bool && (bool)v) return true;
             }
-            try { if (unit.data.unitData.propertyData.isDie) return true; } catch { }
+            try
+            {
+                object pd = unit.data.unitData.propertyData;
+                object v = GetMemberValue(pd, "isDie");
+                if (v is bool && (bool)v) return true;
+            }
+            catch { }
             return false;
+        }
+
+        private static WorldUnitBase ExtractWorldUnit(object current)
+        {
+            if (current == null) return null;
+            WorldUnitBase direct = current as WorldUnitBase;
+            if (direct != null) return direct;
+
+            object value = GetMemberValue(current, "Value");
+            direct = value as WorldUnitBase;
+            if (direct != null) return direct;
+
+            object key = GetMemberValue(current, "Key");
+            string uid = key == null ? "" : key.ToString();
+            if (!string.IsNullOrEmpty(uid))
+            {
+                try { return g.world.unit.allUnit[uid]; } catch { }
+            }
+            return null;
         }
 
         private static string GetUnitId(WorldUnitBase unit)
         {
-            try { return unit.data.unitData.unitID; } catch { }
-            try { return unit.data.unitData.id; } catch { }
+            try
+            {
+                object ud = unit.data.unitData;
+                object v = GetMemberValue(ud, "unitID");
+                if (v != null) return v.ToString();
+                v = GetMemberValue(ud, "id");
+                if (v != null) return v.ToString();
+            }
+            catch { }
             return "";
         }
 
