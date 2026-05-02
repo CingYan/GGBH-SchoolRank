@@ -28,11 +28,14 @@ namespace MOD_nV039M
         private static string lastRunKey = "";
         private static int runCount = 0;
 
-        private static readonly string[] BigElderNames = new[] { "SchoolBigElder", "BigElder", "bigElder", "WarBigElder" };
-        private static readonly string[] ElderNames = new[] { "SchoolElder", "Elder", "elder", "WarElder" };
-        private static readonly string[] TrueDiscipleNames = new[] { "SchoolInherit", "Inherit", "inherit", "Disciple", "SchoolDisciple" };
-        private static readonly string[] InnerDiscipleNames = new[] { "SchoolInner", "Inner", "inner", "SchoolInnerDisciple", "InnerDisciple" };
-        private static readonly string[] OuterDiscipleNames = new[] { "SchoolOuter", "Outer", "outer", "SchoolOuterDisciple", "OuterDisciple" };
+        private static readonly string[] BigElderNames = new[] { "BigElders", "SchoolBigElders", "SchoolBigElder", "BigElder", "bigElder", "WarBigElder" };
+        private static readonly string[] ElderNames = new[] { "Elders", "SchoolElders", "SchoolElder", "Elder", "elder", "WarElder" };
+        private static readonly string[] TrueDiscipleNames = new[] { "Inherit", "SchoolInherit", "inherit", "Disciple", "SchoolDisciple", "TrueDisciple" };
+        private static readonly string[] InnerDiscipleNames = new[] { "In", "SchoolIn", "SchoolInner", "Inner", "inner", "SchoolInnerDisciple", "InnerDisciple" };
+        private static readonly string[] OuterDiscipleNames = new[] { "Out", "SchoolOut", "SchoolOuter", "Outer", "outer", "SchoolOuterDisciple", "OuterDisciple" };
+
+        private static MethodInfo cachedIsHeroMethod = null;
+        private static bool isHeroMethodSearched = false;
 
         private static void Log(string msg)
         {
@@ -346,7 +349,10 @@ namespace MOD_nV039M
 
         private static bool DetectTalent(WorldUnitBase unit, object ud)
         {
-            foreach (string name in new[] { "isTalent", "talent", "isTianJiao", "tianJiao", "isHeavenChosen", "isGenius", "genius" })
+            bool heroByGameApi;
+            if (TryCallIsHero(unit, out heroByGameApi)) return heroByGameApi;
+
+            foreach (string name in new[] { "isHero", "isHeroes", "isTalent", "talent", "isTianJiao", "tianJiao", "isHeavenChosen", "isGenius", "genius", "npcHeroes" })
             {
                 object v = GetMemberValue(ud, name);
                 if (v is bool) return (bool)v;
@@ -361,6 +367,59 @@ namespace MOD_nV039M
                 if (v != null) dump += " " + v;
             }
             return dump.Contains("天骄") || dump.Contains("天驕") || dump.IndexOf("genius", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool TryCallIsHero(WorldUnitBase unit, out bool result)
+        {
+            result = false;
+            try
+            {
+                MethodInfo method = ResolveIsHeroMethod();
+                if (method == null) return false;
+                object value = method.Invoke(null, new object[] { unit });
+                if (value is bool)
+                {
+                    result = (bool)value;
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("[HERO] IsHero call failed: " + ex.Message);
+            }
+            return false;
+        }
+
+        private static MethodInfo ResolveIsHeroMethod()
+        {
+            if (isHeroMethodSearched) return cachedIsHeroMethod;
+            isHeroMethodSearched = true;
+
+            try
+            {
+                Assembly asm = typeof(WorldUnitBase).Assembly;
+                foreach (Type t in asm.GetTypes())
+                {
+                    foreach (MethodInfo m in t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
+                    {
+                        if (m.Name != "IsHero" && m.Name != "IsHeroes") continue;
+                        ParameterInfo[] ps = m.GetParameters();
+                        if (ps.Length == 1 && ps[0].ParameterType == typeof(WorldUnitBase) && m.ReturnType == typeof(bool))
+                        {
+                            cachedIsHeroMethod = m;
+                            Log("[HERO] using " + t.FullName + "." + m.Name + "(WorldUnitBase)");
+                            return cachedIsHeroMethod;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("[HERO] search failed: " + ex.Message);
+            }
+
+            Log("[HERO] IsHero(WorldUnitBase) not found, fallback to fields");
+            return null;
         }
 
         private static bool IsDead(WorldUnitBase unit, object ud)
