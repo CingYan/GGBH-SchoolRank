@@ -4,7 +4,7 @@ using System.Reflection;
 using MelonLoader;
 using HarmonyLib;
 
-namespace MOD_nV039M
+namespace MOD_SNs4Ii
 {
     /// <summary>
     /// 宗門職位自動整編 MOD。

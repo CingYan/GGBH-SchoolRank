@@ -27,6 +27,10 @@
 
 ## 🧪 目前狀態
 
+## 🔧 模組代碼
+
+- 代碼命名空間 / AssemblyName：`MOD_SNs4Ii`
+
 這是 v1 初版 skeleton：
 
 - 已建立完整 MelonLoader MOD 架構
