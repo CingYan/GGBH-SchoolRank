@@ -225,9 +225,17 @@ namespace MOD_SNs4Ii
                     info.unit = unit;
                     info.uid = uid;
                     info.name = GetUnitName(unit, ud);
-                    info.grade = GetBestInt(ud, new[] { "grade", "gradeID", "gradeId", "gradeValue", "level", "realm", "realmLevel" });
-                    info.phase = GetBestInt(ud, new[] { "phase", "gradePhase", "gradeLevel", "levelPhase", "smallGrade", "stateLevel" });
-                    info.power = GetBestInt(ud, new[] { "power", "battlePower", "ability", "fightPower", "combatPower" });
+                    object pd = null;
+                    try { pd = unit.data.unitData.propertyData; } catch { }
+                    info.grade = Math.Max(
+                        GetBestInt(ud, new[] { "grade", "gradeID", "gradeId", "gradeValue", "level", "realm", "realmLevel" }),
+                        GetBestInt(pd, new[] { "grade", "gradeID", "gradeId", "gradeValue", "level", "realm", "realmLevel" }));
+                    info.phase = Math.Max(
+                        GetBestInt(ud, new[] { "phase", "gradePhase", "gradeLevel", "levelPhase", "smallGrade", "stateLevel" }),
+                        GetBestInt(pd, new[] { "phase", "gradePhase", "gradeLevel", "levelPhase", "smallGrade", "stateLevel" }));
+                    info.power = Math.Max(
+                        GetBestInt(ud, new[] { "power", "battlePower", "ability", "fightPower", "combatPower" }),
+                        GetBestInt(pd, new[] { "power", "battlePower", "ability", "fightPower", "combatPower" }));
                     info.isTalent = DetectTalent(unit, ud);
                     info.oldPost = SafeString(GetMemberValue(ud, "postType"));
 
@@ -262,6 +270,13 @@ namespace MOD_SNs4Ii
             {
                 object ud = unit.data.unitData;
                 if (ud == null) return false;
+                string uid = GetUnitId(unit);
+                object enumValue;
+                if (TryResolveSchoolPostEnum(enumCandidates, out enumValue))
+                {
+                    if (TrySetGlobalPostMapping(uid, enumValue, label)) return true;
+                }
+
                 Type t = ud.GetType();
 
                 FieldInfo f = t.GetField("postType", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
@@ -297,19 +312,12 @@ namespace MOD_SNs4Ii
                 Type t = Nullable.GetUnderlyingType(valueType) ?? valueType;
                 if (t.IsEnum)
                 {
-                    string[] names = Enum.GetNames(t);
-                    foreach (string wanted in enumCandidates)
+                    object enumValue;
+                    if (TryResolveEnumValue(t, enumCandidates, out enumValue))
                     {
-                        foreach (string name in names)
-                        {
-                            if (string.Equals(name, wanted, StringComparison.OrdinalIgnoreCase))
-                            {
-                                setter(Enum.Parse(t, name));
-                                return true;
-                            }
-                        }
+                        setter(enumValue);
+                        return true;
                     }
-                    Log("[SET] enum candidates not found in " + t.Name + ": " + string.Join(",", names));
                     return false;
                 }
 
@@ -321,6 +329,122 @@ namespace MOD_SNs4Ii
                 Log("[SET] enum set failed: " + ex.Message);
                 return false;
             }
+        }
+
+        private static bool TryResolveSchoolPostEnum(string[] enumCandidates, out object enumValue)
+        {
+            enumValue = null;
+            try
+            {
+                Type t = Type.GetType("SchoolPostType");
+                if (t == null) t = typeof(WorldUnitBase).Assembly.GetType("SchoolPostType");
+                if (t == null || !t.IsEnum) return false;
+                return TryResolveEnumValue(t, enumCandidates, out enumValue);
+            }
+            catch { return false; }
+        }
+
+        private static bool TryResolveEnumValue(Type enumType, string[] enumCandidates, out object enumValue)
+        {
+            enumValue = null;
+            try
+            {
+                string[] names = Enum.GetNames(enumType);
+                foreach (string wanted in enumCandidates)
+                {
+                    foreach (string name in names)
+                    {
+                        if (string.Equals(name, wanted, StringComparison.OrdinalIgnoreCase))
+                        {
+                            enumValue = Enum.Parse(enumType, name);
+                            return true;
+                        }
+                    }
+                }
+                Log("[SET] enum candidates not found in " + enumType.Name + ": " + string.Join(",", names));
+            }
+            catch (Exception ex)
+            {
+                Log("[SET] enum resolve failed: " + ex.Message);
+            }
+            return false;
+        }
+
+        private static bool TrySetGlobalPostMapping(string uid, object enumValue, string label)
+        {
+            if (string.IsNullOrEmpty(uid) || enumValue == null) return false;
+            try
+            {
+                object unitMgr = g.world.unit;
+                foreach (string mapName in new[] { "unitIDToSchoolPostType", "unitIDToSchoolPostTytpe" })
+                {
+                    object map = GetMemberValue(unitMgr, mapName);
+                    if (map == null) continue;
+                    if (SetMapValue(map, uid, enumValue))
+                    {
+                        TryInvokeNoArg(unitMgr, "UpdateUnitIDToSchoolPostTytpe");
+                        TryInvokeNoArg(unitMgr, "UpdateUnitIDToSchoolPostType");
+                        Log("[SET] " + uid + " -> " + label + " via g.world.unit." + mapName);
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("[SET] global mapping failed uid=" + uid + " target=" + label + " err=" + ex.Message);
+            }
+            return false;
+        }
+
+        private static bool SetMapValue(object map, string key, object value)
+        {
+            try
+            {
+                Type t = map.GetType();
+                PropertyInfo item = t.GetProperty("Item", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (item != null && item.CanWrite)
+                {
+                    try { item.SetValue(map, value, new object[] { key }); return true; } catch { }
+                }
+
+                MethodInfo setItem = t.GetMethod("set_Item", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (setItem != null)
+                {
+                    try { setItem.Invoke(map, new object[] { key, value }); return true; } catch { }
+                }
+
+                MethodInfo contains = t.GetMethod("ContainsKey", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                MethodInfo remove = t.GetMethod("Remove", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                MethodInfo add = t.GetMethod("Add", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                bool has = false;
+                if (contains != null)
+                {
+                    object r = contains.Invoke(map, new object[] { key });
+                    if (r is bool) has = (bool)r;
+                }
+                if (has && remove != null) remove.Invoke(map, new object[] { key });
+                if (add != null)
+                {
+                    add.Invoke(map, new object[] { key, value });
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("[SET] map write failed: " + ex.Message);
+            }
+            return false;
+        }
+
+        private static void TryInvokeNoArg(object obj, string methodName)
+        {
+            try
+            {
+                if (obj == null) return;
+                MethodInfo m = obj.GetType().GetMethod(methodName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
+                if (m != null && m.GetParameters().Length == 0) m.Invoke(m.IsStatic ? null : obj, null);
+            }
+            catch { }
         }
 
         private static void TryDumpSchoolPostTypeEnum()
