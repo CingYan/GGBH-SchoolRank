@@ -13,7 +13,7 @@ namespace MOD_SNs4Ii
     /// </summary>
     public class ModMain
     {
-        private const string VERSION = "v1";
+        private const string VERSION = "v9";
         private const int CHECK_INTERVAL_FRAMES = 300;
 
         // 初版先採保守配額；之後可依遊戲實測 log 調整。
@@ -36,6 +36,7 @@ namespace MOD_SNs4Ii
 
         private static MethodInfo cachedIsHeroMethod = null;
         private static bool isHeroMethodSearched = false;
+        private static bool postStorageProbeDumped = false;
 
         private static void Log(string msg)
         {
@@ -153,35 +154,49 @@ namespace MOD_SNs4Ii
 
             members.Sort(CompareMember);
 
-            int big = 0, elder = 0, trueDisc = 0, inner = 0, outer = 0, changed = 0;
-            for (int i = 0; i < members.Count; i++)
-            {
-                string[] targetNames;
-                string label;
-                if (big < BIG_ELDER_SLOTS)
-                {
-                    targetNames = BigElderNames; label = "BigElder"; big++;
-                }
-                else if (elder < ELDER_SLOTS)
-                {
-                    targetNames = ElderNames; label = "Elder"; elder++;
-                }
-                else if (trueDisc < TRUE_DISCIPLE_SLOTS)
-                {
-                    targetNames = TrueDiscipleNames; label = "TrueDisciple"; trueDisc++;
-                }
-                else if (inner < INNER_DISCIPLE_SLOTS)
-                {
-                    targetNames = InnerDiscipleNames; label = "InnerDisciple"; inner++;
-                }
-                else
-                {
-                    targetNames = OuterDiscipleNames; label = "OuterDisciple"; outer++;
-                }
+            int big = Math.Min(BIG_ELDER_SLOTS, members.Count);
+            int elder = Math.Min(ELDER_SLOTS, Math.Max(0, members.Count - big));
+            int trueDisc = Math.Min(TRUE_DISCIPLE_SLOTS, Math.Max(0, members.Count - big - elder));
+            int inner = Math.Min(INNER_DISCIPLE_SLOTS, Math.Max(0, members.Count - big - elder - trueDisc));
+            int outer = Math.Max(0, members.Count - big - elder - trueDisc - inner);
+            int changed = 0;
 
-                if (SetUnitPostType(members[i].unit, targetNames, label))
+            // V4 正解：鬼谷八荒宗門職位不是 unitData.postType，而是宗門 buildData 裡的名冊清單。
+            // 先直接重寫 npcBigElders / npcElders / npcInherit / npcIn，失敗才退回舊的 per-unit 探測。
+            if (TryRewriteSchoolRosterLists(schoolId, members))
+            {
+                changed = members.Count;
+            }
+            else
+            {
+                Log("[RANK] roster rewrite failed, fallback to per-unit post probing");
+                int ib = 0, ie = 0, it = 0, ii = 0;
+                for (int i = 0; i < members.Count; i++)
                 {
-                    changed++;
+                    string[] targetNames;
+                    string label;
+                    if (ib < BIG_ELDER_SLOTS)
+                    {
+                        targetNames = BigElderNames; label = "BigElder"; ib++;
+                    }
+                    else if (ie < ELDER_SLOTS)
+                    {
+                        targetNames = ElderNames; label = "Elder"; ie++;
+                    }
+                    else if (it < TRUE_DISCIPLE_SLOTS)
+                    {
+                        targetNames = TrueDiscipleNames; label = "TrueDisciple"; it++;
+                    }
+                    else if (ii < INNER_DISCIPLE_SLOTS)
+                    {
+                        targetNames = InnerDiscipleNames; label = "InnerDisciple"; ii++;
+                    }
+                    else
+                    {
+                        targetNames = OuterDiscipleNames; label = "OuterDisciple";
+                    }
+
+                    if (SetUnitPostType(members[i].unit, targetNames, label)) changed++;
                 }
             }
 
@@ -251,6 +266,447 @@ namespace MOD_SNs4Ii
             return result;
         }
 
+
+        private static bool TryRewriteSchoolRosterLists(string schoolId, List<MemberInfoEx> members)
+        {
+            object schoolData = FindSchoolBuildDataById(schoolId);
+            if (schoolData == null)
+            {
+                Log("[ROSTER] school buildData not found for school=" + schoolId);
+                return false;
+            }
+
+            try
+            {
+                List<MemberInfoEx> big = SliceMembers(members, 0, BIG_ELDER_SLOTS);
+                List<MemberInfoEx> elders = SliceMembers(members, BIG_ELDER_SLOTS, ELDER_SLOTS);
+                List<MemberInfoEx> inherit = SliceMembers(members, BIG_ELDER_SLOTS + ELDER_SLOTS, TRUE_DISCIPLE_SLOTS);
+                List<MemberInfoEx> inner = SliceMembers(members, BIG_ELDER_SLOTS + ELDER_SLOTS + TRUE_DISCIPLE_SLOTS, INNER_DISCIPLE_SLOTS);
+                List<MemberInfoEx> outer = SliceMembers(members, BIG_ELDER_SLOTS + ELDER_SLOTS + TRUE_DISCIPLE_SLOTS + INNER_DISCIPLE_SLOTS, 9999);
+
+                bool okBig = SetRosterList(schoolData, new[] { "npcBigElders", "npcBigElder", "bigElders", "bigElder" }, big, "BigElders");
+                bool okElder = SetRosterList(schoolData, new[] { "npcElders", "npcElder", "elders", "elder" }, elders, "Elders");
+                bool okInherit = SetRosterList(schoolData, new[] { "npcInherit", "npcInherits", "inheres", "inherit", "npcTrueDisciple", "npcTrueDisciples" }, inherit, "Inherit");
+
+                // 內門 + 外門在很多版本只是一個 npcIn 清單；若有 npcOut 則分開寫。
+                bool hasOuter = HasMember(schoolData, "npcOut") || HasMember(schoolData, "npcOuter") || HasMember(schoolData, "npcOuts");
+                bool okInner;
+                bool okOuter = true;
+                if (hasOuter)
+                {
+                    okInner = SetRosterList(schoolData, new[] { "npcIn", "npcInner", "npcInners", "inner" }, inner, "Inner");
+                    okOuter = SetRosterList(schoolData, new[] { "npcOut", "npcOuter", "npcOuts", "outer" }, outer, "Outer");
+                }
+                else
+                {
+                    List<MemberInfoEx> rest = new List<MemberInfoEx>();
+                    rest.AddRange(inner);
+                    rest.AddRange(outer);
+                    okInner = SetRosterList(schoolData, new[] { "npcIn", "npcInner", "npcInners", "inner" }, rest, "In+Outer");
+                }
+
+                ForceRefreshSchoolObjects(schoolData);
+                DumpSchoolDebugObjects(schoolData, "after-write");
+
+                Log("[ROSTER] rewrite school=" + schoolId
+                    + " ok=" + okBig + "/" + okElder + "/" + okInherit + "/" + okInner + "/" + okOuter
+                    + " counts=" + big.Count + "/" + elders.Count + "/" + inherit.Count + "/" + inner.Count + "/" + outer.Count);
+                return okBig || okElder || okInherit || okInner || okOuter;
+            }
+            catch (Exception ex)
+            {
+                Log("[ROSTER] rewrite failed: " + ex);
+                return false;
+            }
+        }
+
+        private static List<MemberInfoEx> SliceMembers(List<MemberInfoEx> members, int start, int count)
+        {
+            List<MemberInfoEx> result = new List<MemberInfoEx>();
+            for (int i = start; i < members.Count && result.Count < count; i++) result.Add(members[i]);
+            return result;
+        }
+
+        private static bool SetRosterList(object schoolData, string[] names, List<MemberInfoEx> selected, string label)
+        {
+            foreach (string name in names)
+            {
+                object list = GetMemberValue(schoolData, name);
+                if (list == null) continue;
+                if (ReplaceListContentsSmart(list, selected, label + "." + name))
+                {
+                    Log("[ROSTER] " + label + " -> " + name + " count=" + selected.Count + " top=" + FirstNames(selected, 3));
+                    return true;
+                }
+            }
+            Log("[ROSTER] missing list for " + label);
+            return false;
+        }
+
+        private static bool ReplaceListContentsSmart(object list, List<MemberInfoEx> selected, string label)
+        {
+            try
+            {
+                Type t = list.GetType();
+                MethodInfo clear = t.GetMethod("Clear", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                MethodInfo add = t.GetMethod("Add", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (clear == null || add == null) return false;
+
+                Type itemType = GetListItemType(list);
+                Log("[ROSTER] " + label + " listType=" + t.FullName + " itemType=" + (itemType == null ? "unknown" : itemType.FullName));
+
+                clear.Invoke(list, null);
+                foreach (MemberInfoEx m in selected)
+                {
+                    object item = ConvertRosterItem(m, itemType);
+                    add.Invoke(list, new object[] { item });
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log("[ROSTER] list replace failed " + label + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        private static Type GetListItemType(object list)
+        {
+            try
+            {
+                Type t = list.GetType();
+                if (t.IsGenericType)
+                {
+                    Type[] args = t.GetGenericArguments();
+                    if (args.Length == 1) return args[0];
+                }
+                MethodInfo add = t.GetMethod("Add", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (add != null)
+                {
+                    ParameterInfo[] ps = add.GetParameters();
+                    if (ps.Length == 1) return ps[0].ParameterType;
+                }
+            }
+            catch { }
+            return typeof(string);
+        }
+
+        private static object ConvertRosterItem(MemberInfoEx m, Type itemType)
+        {
+            if (itemType == null || itemType == typeof(string) || itemType == typeof(object)) return m.uid;
+            try
+            {
+                if (itemType.IsAssignableFrom(typeof(WorldUnitBase))) return m.unit;
+                object ud = m.unit.data.unitData;
+                if (ud != null && itemType.IsAssignableFrom(ud.GetType())) return ud;
+                object pd = m.unit.data.unitData.propertyData;
+                if (pd != null && itemType.IsAssignableFrom(pd.GetType())) return pd;
+            }
+            catch { }
+            return m.uid;
+        }
+
+        private static string FirstNames(List<MemberInfoEx> members, int count)
+        {
+            List<string> names = new List<string>();
+            for (int i = 0; i < members.Count && i < count; i++) names.Add(members[i].name + "(" + members[i].uid + ")");
+            return string.Join(",", names.ToArray());
+        }
+
+
+        private static void DumpSchoolDebugObjects(object schoolData, string reason)
+        {
+            try
+            {
+                Log("[DUMP-LISTS] reason=" + reason);
+                DumpObjectMembers(schoolData, "buildData", 0);
+                object schoolWrap = null;
+                try { schoolWrap = GetMemberValue(g.world.playerUnit.data, "school"); } catch { }
+                if (schoolWrap == null) { try { schoolWrap = GetMemberValue(g.world.playerUnit.data, "_school"); } catch { } }
+                DumpObjectMembers(schoolWrap, "playerUnit.data.school", 0);
+            }
+            catch (Exception ex)
+            {
+                Log("[DUMP-LISTS] failed: " + ex.Message);
+            }
+        }
+
+        private static void DumpObjectMembers(object obj, string path, int depth)
+        {
+            if (obj == null || depth > 1) return;
+            try
+            {
+                Type t = obj.GetType();
+                Log("[DUMP-LISTS] object " + path + " type=" + t.FullName);
+                BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                foreach (FieldInfo f in t.GetFields(flags))
+                {
+                    object v = null;
+                    try { v = f.GetValue(obj); } catch { }
+                    DumpMemberValue(path + "." + f.Name, f.FieldType, v, depth);
+                }
+                foreach (PropertyInfo p in t.GetProperties(flags))
+                {
+                    if (p.GetIndexParameters().Length != 0) continue;
+                    object v = null;
+                    try { v = p.GetValue(obj, null); } catch { }
+                    DumpMemberValue(path + "." + p.Name, p.PropertyType, v, depth);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("[DUMP-LISTS] object dump failed " + path + ": " + ex.Message);
+            }
+        }
+
+        private static void DumpMemberValue(string path, Type declaredType, object value, int depth)
+        {
+            try
+            {
+                string lower = path.ToLowerInvariant();
+                bool interestingName = lower.Contains("npc") || lower.Contains("unit") || lower.Contains("elder") || lower.Contains("school") || lower.Contains("post") || lower.Contains("hall") || lower.Contains("build") || lower.Contains("member") || lower.Contains("office") || lower.Contains("job") || lower.Contains("position") || lower.Contains("duty");
+                string valueType = value == null ? "null" : value.GetType().FullName;
+
+                int count;
+                if (TryGetCollectionCount(value, out count))
+                {
+                    Log("[DUMP-LISTS] list " + path + " declared=" + declaredType.FullName + " valueType=" + valueType + " count=" + count + " sample=" + SampleCollection(value, count, 8));
+                    return;
+                }
+
+                if (interestingName)
+                {
+                    string sample = value == null ? "null" : value.ToString();
+                    if (sample.Length > 120) sample = sample.Substring(0, 120);
+                    Log("[DUMP-LISTS] member " + path + " declared=" + declaredType.FullName + " valueType=" + valueType + " value=" + sample);
+                }
+
+                if (value != null && depth < 1 && interestingName && !IsTerminalType(value.GetType()))
+                {
+                    DumpObjectMembers(value, path, depth + 1);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("[DUMP-LISTS] member failed " + path + ": " + ex.Message);
+            }
+        }
+
+        private static bool TryGetCollectionCount(object value, out int count)
+        {
+            count = 0;
+            if (value == null || value is string) return false;
+            try
+            {
+                Type t = value.GetType();
+                PropertyInfo p = t.GetProperty("Count", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (p == null) p = t.GetProperty("Length", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (p != null)
+                {
+                    object c = p.GetValue(value, null);
+                    return TryToInt(c, out count);
+                }
+                FieldInfo f = t.GetField("Count", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (f != null)
+                {
+                    object c = f.GetValue(value);
+                    return TryToInt(c, out count);
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static string SampleCollection(object value, int count, int max)
+        {
+            List<string> sample = new List<string>();
+            if (value == null) return "";
+            Type t = value.GetType();
+            PropertyInfo itemProp = t.GetProperty("Item", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            MethodInfo getItem = t.GetMethod("get_Item", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            for (int i = 0; i < count && i < max; i++)
+            {
+                object item = null;
+                try
+                {
+                    if (itemProp != null) item = itemProp.GetValue(value, new object[] { i });
+                    else if (getItem != null) item = getItem.Invoke(value, new object[] { i });
+                }
+                catch { }
+                sample.Add(DescribeListItem(item));
+            }
+            return string.Join(" | ", sample.ToArray());
+        }
+
+        private static string DescribeListItem(object item)
+        {
+            if (item == null) return "null";
+            try
+            {
+                string s = item.ToString();
+                WorldUnitBase unit = null;
+                if (item is WorldUnitBase) unit = (WorldUnitBase)item;
+                else if (!string.IsNullOrEmpty(s))
+                {
+                    try { unit = g.world.unit.allUnit[s]; } catch { }
+                }
+                if (unit != null)
+                {
+                    object ud = unit.data.unitData;
+                    return GetUnitName(unit, ud) + "(" + GetUnitId(unit) + ")";
+                }
+                if (s.Length > 80) s = s.Substring(0, 80);
+                return s;
+            }
+            catch { return item.ToString(); }
+        }
+
+        private static void ForceRefreshSchoolObjects(object schoolData)
+        {
+            // v5 的 aggressive Refresh/Update/Init 可能在宗門 UI 開啟期間觸發遊戲 UI lifecycle NRE：
+            // UnitActionFeedback1012.OnCreate() NullReferenceException。
+            // v6 改成只呼叫已知的 unit post cache 更新；畫面請關閉宗門頁後重開或切場景讓 UI 自然重建。
+            try
+            {
+                TryInvokeNoArg(g.world.unit, "UpdateUnitIDToSchoolPostTytpe");
+                TryInvokeNoArg(g.world.unit, "UpdateUnitIDToSchoolPostType");
+            }
+            catch (Exception ex)
+            {
+                Log("[ROSTER] safe refresh failed: " + ex.Message);
+            }
+        }
+
+        private static bool HasMember(object obj, string name)
+        {
+            if (obj == null) return false;
+            Type t = obj.GetType();
+            BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            return t.GetField(name, flags) != null || t.GetProperty(name, flags) != null;
+        }
+
+        private static object FindSchoolBuildDataById(string schoolId)
+        {
+            // v9：先走實測已知正解路徑。v6/v7 已證明資料在 playerUnit.data.school/_school.buildData。
+            // 不要先全域掃描；Il2Cpp wrapper 物件圖很容易因 depth/seen/初始化狀態漏掉。
+            try
+            {
+                object playerData = g.world.playerUnit.data;
+                foreach (string schoolMember in new[] { "school", "_school" })
+                {
+                    object schoolWrap = GetMemberValue(playerData, schoolMember);
+                    object buildData = GetMemberValue(schoolWrap, "buildData");
+                    if (LooksLikeSchoolBuildData(buildData, schoolId))
+                    {
+                        Log("[ROSTER] found schoolData at g.world.playerUnit.data." + schoolMember + ".buildData type=" + buildData.GetType().FullName);
+                        return buildData;
+                    }
+                    // 有些版本 schoolWrap 本身就是 SchoolData。
+                    if (LooksLikeSchoolBuildData(schoolWrap, schoolId))
+                    {
+                        Log("[ROSTER] found schoolData at g.world.playerUnit.data." + schoolMember + " type=" + schoolWrap.GetType().FullName);
+                        return schoolWrap;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("[ROSTER] direct player school lookup failed: " + ex.Message);
+            }
+
+            object direct = TryFindSchoolDataInObject(g.world, schoolId, "g.world", 0, new HashSet<int>());
+            if (direct != null) return direct;
+            try { return TryFindSchoolDataInObject(g.data, schoolId, "g.data", 0, new HashSet<int>()); } catch { }
+            return null;
+        }
+
+        private static object TryFindSchoolDataInObject(object obj, string schoolId, string path, int depth, HashSet<int> seen)
+        {
+            if (obj == null || depth > 5) return null;
+            try
+            {
+                int hash = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
+                if (seen.Contains(hash)) return null;
+                seen.Add(hash);
+
+                if (LooksLikeSchoolBuildData(obj, schoolId))
+                {
+                    Log("[ROSTER] found schoolData at " + path + " type=" + obj.GetType().FullName);
+                    return obj;
+                }
+
+                Type t = obj.GetType();
+                if (IsTerminalType(t)) return null;
+                BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+                foreach (FieldInfo f in t.GetFields(flags))
+                {
+                    object v = null;
+                    try { v = f.GetValue(obj); } catch { }
+                    object found = TryFindSchoolDataChild(v, schoolId, path + "." + f.Name, depth + 1, seen);
+                    if (found != null) return found;
+                }
+                foreach (PropertyInfo p in t.GetProperties(flags))
+                {
+                    if (p.GetIndexParameters().Length != 0) continue;
+                    object v = null;
+                    try { v = p.GetValue(obj, null); } catch { }
+                    object found = TryFindSchoolDataChild(v, schoolId, path + "." + p.Name, depth + 1, seen);
+                    if (found != null) return found;
+                }
+            }
+            catch (Exception ex)
+            {
+                if (depth <= 1) Log("[ROSTER] scan failed at " + path + ": " + ex.Message);
+            }
+            return null;
+        }
+
+        private static object TryFindSchoolDataChild(object v, string schoolId, string path, int depth, HashSet<int> seen)
+        {
+            if (v == null) return null;
+            Type vt = v.GetType();
+            if (IsTerminalType(vt)) return null;
+            try
+            {
+                System.Collections.IEnumerable en = v as System.Collections.IEnumerable;
+                if (en != null && !(v is string))
+                {
+                    int i = 0;
+                    foreach (object item in en)
+                    {
+                        object candidate = item;
+                        object val = GetMemberValue(item, "Value");
+                        if (val != null) candidate = val;
+                        object found = TryFindSchoolDataInObject(candidate, schoolId, path + "[]", depth + 1, seen);
+                        if (found != null) return found;
+                        if (++i > 2000) break;
+                    }
+                    return null;
+                }
+            }
+            catch { }
+            return TryFindSchoolDataInObject(v, schoolId, path, depth, seen);
+        }
+
+        private static bool LooksLikeSchoolBuildData(object obj, string schoolId)
+        {
+            if (obj == null) return false;
+            string id = SafeString(GetMemberValue(obj, "id"));
+            if (id != schoolId)
+            {
+                string sid = SafeString(GetMemberValue(obj, "schoolID"));
+                if (sid != schoolId) return false;
+            }
+            return HasMember(obj, "npcIn") || HasMember(obj, "npcElders") || HasMember(obj, "npcBigElders") || HasMember(obj, "npcInherit");
+        }
+
+        private static bool IsTerminalType(Type t)
+        {
+            if (t == null) return true;
+            return t.IsPrimitive || t.IsEnum || t == typeof(string) || t == typeof(decimal) || t.FullName.StartsWith("System.Reflection");
+        }
+
         private static int CompareMember(MemberInfoEx a, MemberInfoEx b)
         {
             int c = b.grade.CompareTo(a.grade);
@@ -295,6 +751,14 @@ namespace MOD_SNs4Ii
                     if (p != null && p.CanWrite && TrySetEnumOrValue(ud, p.PropertyType, v => p.SetValue(ud, v, null), enumCandidates)) return true;
                 }
 
+                object postEnumValue;
+                if (TryResolveSchoolPostEnum(enumCandidates, out postEnumValue))
+                {
+                    if (TrySetPostLikeMemberRecursive(unit, postEnumValue, "unit", 0)) return true;
+                    if (TrySetPostLikeMemberRecursive(ud, postEnumValue, "unitData", 0)) return true;
+                }
+
+                DumpPostStorageProbeOnce(unit);
                 Log("[SET] no writable post field for " + GetUnitId(unit) + " target=" + label);
                 return false;
             }
@@ -302,6 +766,103 @@ namespace MOD_SNs4Ii
             {
                 Log("[SET] failed target=" + label + " uid=" + GetUnitId(unit) + " err=" + ex.Message);
                 return false;
+            }
+        }
+
+
+        private static bool TrySetPostLikeMemberRecursive(object obj, object enumValue, string path, int depth)
+        {
+            if (obj == null || enumValue == null || depth > 2) return false;
+            try
+            {
+                Type t = obj.GetType();
+                BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+                foreach (FieldInfo f in t.GetFields(flags))
+                {
+                    if (IsPostLikeName(f.Name) && TrySetPostValue(obj, f.FieldType, v => f.SetValue(obj, v), enumValue, path + "." + f.Name)) return true;
+                }
+
+                foreach (PropertyInfo p in t.GetProperties(flags))
+                {
+                    if (p.GetIndexParameters().Length != 0) continue;
+                    if (IsPostLikeName(p.Name) && p.CanWrite && TrySetPostValue(obj, p.PropertyType, v => p.SetValue(obj, v, null), enumValue, path + "." + p.Name)) return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("[SET] post-like recursive failed at " + path + ": " + ex.Message);
+            }
+            return false;
+        }
+
+        private static bool IsPostLikeName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            string n = name.ToLowerInvariant();
+            return n.Contains("post") || n.Contains("position") || n.Contains("duty");
+        }
+
+        private static bool TrySetPostValue(object owner, Type valueType, Action<object> setter, object enumValue, string path)
+        {
+            try
+            {
+                Type vt = Nullable.GetUnderlyingType(valueType) ?? valueType;
+                object value = null;
+                if (vt.IsEnum)
+                {
+                    if (vt != enumValue.GetType()) return false;
+                    value = enumValue;
+                }
+                else if (vt == typeof(int)) value = Convert.ToInt32(enumValue);
+                else if (vt == typeof(long)) value = Convert.ToInt64(enumValue);
+                else if (vt == typeof(short)) value = Convert.ToInt16(enumValue);
+                else return false;
+
+                setter(value);
+                Log("[SET] post-like member hit " + path + " type=" + valueType.FullName);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log("[SET] post-like member failed " + path + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        private static void DumpPostStorageProbeOnce(WorldUnitBase unit)
+        {
+            if (postStorageProbeDumped) return;
+            postStorageProbeDumped = true;
+            try
+            {
+                Log("[PROBE-POST] unitData members containing post/school:");
+                object ud = unit.data.unitData;
+                DumpInterestingMembers(ud, "unitData");
+                Log("[PROBE-POST] g.world.unit members containing post/school:");
+                DumpInterestingMembers(g.world.unit, "g.world.unit");
+            }
+            catch (Exception ex)
+            {
+                Log("[PROBE-POST] failed: " + ex.Message);
+            }
+        }
+
+        private static void DumpInterestingMembers(object obj, string path)
+        {
+            if (obj == null) return;
+            Type t = obj.GetType();
+            BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            foreach (FieldInfo f in t.GetFields(flags))
+            {
+                string n = f.Name.ToLowerInvariant();
+                if (n.Contains("post") || n.Contains("school")) Log("[PROBE-POST] field " + path + "." + f.Name + " type=" + f.FieldType.FullName);
+            }
+            foreach (PropertyInfo p in t.GetProperties(flags))
+            {
+                if (p.GetIndexParameters().Length != 0) continue;
+                string n = p.Name.ToLowerInvariant();
+                if (n.Contains("post") || n.Contains("school")) Log("[PROBE-POST] prop " + path + "." + p.Name + " type=" + p.PropertyType.FullName + " canWrite=" + p.CanWrite);
             }
         }
 
@@ -376,17 +937,33 @@ namespace MOD_SNs4Ii
             try
             {
                 object unitMgr = g.world.unit;
-                foreach (string mapName in new[] { "unitIDToSchoolPostType", "unitIDToSchoolPostTytpe" })
+
+                // 常見/疑似欄位名先直打。上一版只試兩個名字太保守，實測已證明不夠。
+                foreach (string mapName in new[] {
+                    "unitIDToSchoolPostType", "unitIDToSchoolPostTytpe",
+                    "unitIdToSchoolPostType", "unitIdToSchoolPostTytpe",
+                    "unitIDToPostType", "unitIdToPostType",
+                    "unitID2SchoolPostType", "unitID2SchoolPostTytpe",
+                    "schoolPostType", "schoolPostTypes", "schoolPosts", "postTypes"
+                })
                 {
                     object map = GetMemberValue(unitMgr, mapName);
                     if (map == null) continue;
                     if (SetMapValue(map, uid, enumValue))
                     {
-                        TryInvokeNoArg(unitMgr, "UpdateUnitIDToSchoolPostTytpe");
-                        TryInvokeNoArg(unitMgr, "UpdateUnitIDToSchoolPostType");
+                        FlushPostCaches(unitMgr);
                         Log("[SET] " + uid + " -> " + label + " via g.world.unit." + mapName);
                         return true;
                     }
+                }
+
+                // V3：掃描 g.world.unit 內所有「像職位表」的 Dictionary / Map。
+                // 限定 value type 必須能吃 SchoolPostType enum，避免亂寫其他資料表。
+                if (TrySetPostMapByReflection(unitMgr, uid, enumValue, "g.world.unit", 0))
+                {
+                    FlushPostCaches(unitMgr);
+                    Log("[SET] " + uid + " -> " + label + " via reflected post map");
+                    return true;
                 }
             }
             catch (Exception ex)
@@ -394,6 +971,109 @@ namespace MOD_SNs4Ii
                 Log("[SET] global mapping failed uid=" + uid + " target=" + label + " err=" + ex.Message);
             }
             return false;
+        }
+
+        private static bool TrySetPostMapByReflection(object obj, string uid, object enumValue, string path, int depth)
+        {
+            if (obj == null || depth > 2) return false;
+            try
+            {
+                Type t = obj.GetType();
+                BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+                foreach (FieldInfo f in t.GetFields(flags))
+                {
+                    object value = null;
+                    try { value = f.GetValue(obj); } catch { }
+                    if (TrySetCandidatePostMap(value, uid, enumValue, path + "." + f.Name)) return true;
+                }
+
+                foreach (PropertyInfo p in t.GetProperties(flags))
+                {
+                    if (p.GetIndexParameters().Length != 0) continue;
+                    object value = null;
+                    try { value = p.GetValue(obj, null); } catch { }
+                    if (TrySetCandidatePostMap(value, uid, enumValue, path + "." + p.Name)) return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("[SET] post map reflection failed at " + path + ": " + ex.Message);
+            }
+            return false;
+        }
+
+        private static bool TrySetCandidatePostMap(object map, string uid, object enumValue, string path)
+        {
+            if (map == null) return false;
+            try
+            {
+                Type t = map.GetType();
+                if (!LooksLikeMap(t)) return false;
+
+                Type valueType = GetMapValueType(t);
+                if (valueType != null)
+                {
+                    Type vt = Nullable.GetUnderlyingType(valueType) ?? valueType;
+                    Type et = enumValue.GetType();
+                    if (vt.IsEnum && vt != et) return false;
+                    if (!vt.IsEnum && vt != typeof(object) && vt != typeof(int) && vt != typeof(long) && vt != typeof(short)) return false;
+                    if (!vt.IsEnum && !IsPostLikeName(path)) return false;
+                }
+
+                object valueToSet = ConvertPostValueForMap(enumValue, valueType);
+                if (SetMapValue(map, uid, valueToSet))
+                {
+                    Log("[SET] reflected map hit " + path + " type=" + t.FullName);
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("[SET] candidate map failed " + path + ": " + ex.Message);
+            }
+            return false;
+        }
+
+        private static bool LooksLikeMap(Type t)
+        {
+            if (t == null) return false;
+            if (t.GetProperty("Item", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance) == null) return false;
+            return t.GetMethod("ContainsKey", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance) != null
+                || t.GetMethod("Add", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance) != null
+                || t.FullName.IndexOf("Dictionary", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static Type GetMapValueType(Type t)
+        {
+            try
+            {
+                if (t.IsGenericType)
+                {
+                    Type[] args = t.GetGenericArguments();
+                    if (args.Length == 2) return args[1];
+                }
+
+                PropertyInfo item = t.GetProperty("Item", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (item != null) return item.PropertyType;
+            }
+            catch { }
+            return null;
+        }
+
+        private static object ConvertPostValueForMap(object enumValue, Type valueType)
+        {
+            if (valueType == null) return enumValue;
+            Type vt = Nullable.GetUnderlyingType(valueType) ?? valueType;
+            try
+            {
+                if (vt.IsEnum) return enumValue;
+                if (vt == typeof(int)) return Convert.ToInt32(enumValue);
+                if (vt == typeof(long)) return Convert.ToInt64(enumValue);
+                if (vt == typeof(short)) return Convert.ToInt16(enumValue);
+            }
+            catch { }
+            return enumValue;
         }
 
         private static bool SetMapValue(object map, string key, object value)
@@ -434,6 +1114,15 @@ namespace MOD_SNs4Ii
                 Log("[SET] map write failed: " + ex.Message);
             }
             return false;
+        }
+
+        private static void FlushPostCaches(object unitMgr)
+        {
+            TryInvokeNoArg(unitMgr, "UpdateUnitIDToSchoolPostTytpe");
+            TryInvokeNoArg(unitMgr, "UpdateUnitIDToSchoolPostType");
+            TryInvokeNoArg(unitMgr, "UpdateSchoolPostType");
+            TryInvokeNoArg(unitMgr, "UpdateSchoolPost");
+            TryInvokeNoArg(unitMgr, "UpdateUnitPost");
         }
 
         private static void TryInvokeNoArg(object obj, string methodName)
