@@ -13,14 +13,14 @@ namespace MOD_SNs4Ii
     /// </summary>
     public class ModMain
     {
-        private const string VERSION = "v9";
+        private const string VERSION = "v10";
         private const int CHECK_INTERVAL_FRAMES = 300;
 
-        // 初版先採保守配額；之後可依遊戲實測 log 調整。
-        private const int BIG_ELDER_SLOTS = 1;
-        private const int ELDER_SLOTS = 3;
+        // 單一宗門實際配額：大長老 2、長老 5、真傳 10、內門 20，其餘為外門。
+        private const int BIG_ELDER_SLOTS = 2;
+        private const int ELDER_SLOTS = 5;
         private const int TRUE_DISCIPLE_SLOTS = 10;
-        private const int INNER_DISCIPLE_SLOTS = 30;
+        private const int INNER_DISCIPLE_SLOTS = 20;
 
         // 每個遊戲月份只自動整編一次，避免玩家打開 UI 或切場景時反覆洗職位。
         private static bool worldEnterHooked = false;
@@ -587,7 +587,7 @@ namespace MOD_SNs4Ii
 
         private static object FindSchoolBuildDataById(string schoolId)
         {
-            // v9：先走實測已知正解路徑。v6/v7 已證明資料在 playerUnit.data.school/_school.buildData。
+            // v10：先走實測已知正解路徑。v6/v7 已證明資料在 playerUnit.data.school/_school.buildData。
             // 不要先全域掃描；Il2Cpp wrapper 物件圖很容易因 depth/seen/初始化狀態漏掉。
             try
             {
