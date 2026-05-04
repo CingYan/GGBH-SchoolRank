@@ -13,7 +13,7 @@ namespace MOD_SNs4Ii
     /// </summary>
     public class ModMain
     {
-        private const string VERSION = "v10";
+        private const string VERSION = "v11";
         private const int CHECK_INTERVAL_FRAMES = 300;
 
         // 單一宗門實際配額：大長老 2、長老 5、真傳 10、內門 20，其餘為外門。
@@ -37,6 +37,7 @@ namespace MOD_SNs4Ii
         private static MethodInfo cachedIsHeroMethod = null;
         private static bool isHeroMethodSearched = false;
         private static bool postStorageProbeDumped = false;
+        private static bool branchProbeDumped = false;
 
         private static void Log(string msg)
         {
@@ -152,6 +153,8 @@ namespace MOD_SNs4Ii
                 return;
             }
 
+            DumpBranchProbeOnce(schoolId, playerData, members);
+
             members.Sort(CompareMember);
 
             int big = Math.Min(BIG_ELDER_SLOTS, members.Count);
@@ -264,6 +267,215 @@ namespace MOD_SNs4Ii
             }
 
             return result;
+        }
+
+        private static void DumpBranchProbeOnce(string schoolId, object playerUnitData, List<MemberInfoEx> members)
+        {
+            if (branchProbeDumped) return;
+            branchProbeDumped = true;
+
+            try
+            {
+                Log("[BRANCH-PROBE] start school=" + schoolId + " members=" + members.Count + " mode=read-only");
+                DumpBranchLikeMembers(playerUnitData, "player.unitData", 0);
+
+                object playerData = null;
+                try { playerData = g.world.playerUnit.data; } catch { }
+                foreach (string schoolMember in new[] { "school", "_school" })
+                {
+                    object schoolWrap = GetMemberValue(playerData, schoolMember);
+                    DumpBranchLikeMembers(schoolWrap, "player.data." + schoolMember, 0);
+                    DumpBranchLikeMembers(GetMemberValue(schoolWrap, "buildData"), "player.data." + schoolMember + ".buildData", 0);
+                }
+
+                int sampleCount = Math.Min(12, members.Count);
+                for (int i = 0; i < sampleCount; i++)
+                {
+                    MemberInfoEx m = members[i];
+                    object ud = null;
+                    object pd = null;
+                    try { ud = m.unit.data.unitData; } catch { }
+                    try { pd = m.unit.data.unitData.propertyData; } catch { }
+                    Log("[BRANCH-PROBE] npc #" + (i + 1) + " name=" + m.name + " uid=" + m.uid + " schoolID=" + SafeString(GetMemberValue(ud, "schoolID")));
+                    DumpBranchLikeMembers(ud, "npc[" + i + "].unitData", 0);
+                    DumpBranchLikeMembers(pd, "npc[" + i + "].propertyData", 0);
+                }
+
+                int hits = 0;
+                HashSet<int> seen = new HashSet<int>();
+                ScanSchoolBranchCandidates(g.world, "g.world", 0, seen, ref hits);
+                try { ScanSchoolBranchCandidates(g.data, "g.data", 0, seen, ref hits); } catch { }
+                Log("[BRANCH-PROBE] done candidateHits=" + hits);
+            }
+            catch (Exception ex)
+            {
+                Log("[BRANCH-PROBE] failed: " + ex.Message);
+            }
+        }
+
+        private static void DumpBranchLikeMembers(object obj, string path, int depth)
+        {
+            if (obj == null || depth > 1) return;
+            try
+            {
+                Type t = obj.GetType();
+                if (IsTerminalType(t)) return;
+                BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+                foreach (FieldInfo f in t.GetFields(flags))
+                {
+                    if (!IsBranchProbeName(f.Name)) continue;
+                    object v = null;
+                    try { v = f.GetValue(obj); } catch { }
+                    LogBranchProbeValue(path + "." + f.Name, f.FieldType, v, depth);
+                }
+                foreach (PropertyInfo p in t.GetProperties(flags))
+                {
+                    if (p.GetIndexParameters().Length != 0) continue;
+                    if (!IsBranchProbeName(p.Name)) continue;
+                    object v = null;
+                    try { v = p.GetValue(obj, null); } catch { }
+                    LogBranchProbeValue(path + "." + p.Name, p.PropertyType, v, depth);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("[BRANCH-PROBE] dump failed " + path + ": " + ex.Message);
+            }
+        }
+
+        private static void LogBranchProbeValue(string path, Type declaredType, object value, int depth)
+        {
+            try
+            {
+                string valueType = value == null ? "null" : value.GetType().FullName;
+                int count;
+                if (TryGetCollectionCount(value, out count))
+                {
+                    Log("[BRANCH-PROBE] list " + path + " declared=" + declaredType.FullName + " valueType=" + valueType + " count=" + count + " sample=" + SampleCollection(value, count, 5));
+                    return;
+                }
+
+                string sample = value == null ? "null" : value.ToString();
+                if (sample.Length > 140) sample = sample.Substring(0, 140);
+                Log("[BRANCH-PROBE] member " + path + " declared=" + declaredType.FullName + " valueType=" + valueType + " value=" + sample);
+
+                if (value != null && depth < 1 && !IsTerminalType(value.GetType())) DumpBranchLikeMembers(value, path, depth + 1);
+            }
+            catch { }
+        }
+
+        private static bool IsBranchProbeName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            string n = name.ToLowerInvariant();
+            return n.Contains("school") || n.Contains("sect") || n.Contains("branch") || n.Contains("sub")
+                || n.Contains("hall") || n.Contains("area") || n.Contains("build") || n.Contains("parent")
+                || n.Contains("data") || n.Contains("name") || n.Contains("npc") || n.Contains("elder") || n.Contains("inherit")
+                || n.Contains("member") || n.Contains("post") || n.Contains("position") || n.Contains("duty");
+        }
+
+        private static void ScanSchoolBranchCandidates(object obj, string path, int depth, HashSet<int> seen, ref int hits)
+        {
+            if (obj == null || depth > 4 || hits >= 80) return;
+            try
+            {
+                Type t = obj.GetType();
+                if (IsTerminalType(t)) return;
+                int hash = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
+                if (seen.Contains(hash)) return;
+                seen.Add(hash);
+
+                if (LooksLikeBranchSchoolCandidate(obj))
+                {
+                    hits++;
+                    LogSchoolBranchCandidate(obj, path, hits);
+                }
+
+                System.Collections.IEnumerable en = obj as System.Collections.IEnumerable;
+                if (en != null && !(obj is string))
+                {
+                    int i = 0;
+                    foreach (object item in en)
+                    {
+                        object candidate = item;
+                        object val = GetMemberValue(item, "Value");
+                        if (val != null) candidate = val;
+                        ScanSchoolBranchCandidates(candidate, path + "[]", depth + 1, seen, ref hits);
+                        if (++i > 300) break;
+                        if (hits >= 80) break;
+                    }
+                    return;
+                }
+
+                BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                foreach (FieldInfo f in t.GetFields(flags))
+                {
+                    if (!IsBranchProbeName(f.Name)) continue;
+                    object v = null;
+                    try { v = f.GetValue(obj); } catch { }
+                    ScanSchoolBranchCandidates(v, path + "." + f.Name, depth + 1, seen, ref hits);
+                    if (hits >= 80) return;
+                }
+                foreach (PropertyInfo p in t.GetProperties(flags))
+                {
+                    if (p.GetIndexParameters().Length != 0) continue;
+                    if (!IsBranchProbeName(p.Name)) continue;
+                    object v = null;
+                    try { v = p.GetValue(obj, null); } catch { }
+                    ScanSchoolBranchCandidates(v, path + "." + p.Name, depth + 1, seen, ref hits);
+                    if (hits >= 80) return;
+                }
+            }
+            catch { }
+        }
+
+        private static bool LooksLikeBranchSchoolCandidate(object obj)
+        {
+            if (obj == null) return false;
+            if (HasMember(obj, "npcIn") || HasMember(obj, "npcOut") || HasMember(obj, "npcElders") || HasMember(obj, "npcBigElders") || HasMember(obj, "npcInherit")) return true;
+            if (HasMember(obj, "schoolID") && (HasMember(obj, "name") || HasMember(obj, "schoolName") || HasMember(obj, "buildData") || HasMember(obj, "parentID") || HasMember(obj, "branchID") || HasMember(obj, "hallID"))) return true;
+            return false;
+        }
+
+        private static void LogSchoolBranchCandidate(object obj, string path, int index)
+        {
+            try
+            {
+                string id = FirstNonEmpty(obj, new[] { "id", "schoolID", "schoolId", "buildID", "buildId" });
+                string name = FirstNonEmpty(obj, new[] { "name", "schoolName", "buildName", "areaName", "branchName", "hallName" });
+                string parent = FirstNonEmpty(obj, new[] { "parentID", "parentId", "parentSchoolID", "parentSchoolId", "mainSchoolID", "mainSchoolId" });
+                string branch = FirstNonEmpty(obj, new[] { "branchID", "branchId", "subSchoolID", "subSchoolId", "hallID", "hallId", "areaID", "areaId" });
+                Log("[BRANCH-PROBE] candidate #" + index + " path=" + path + " type=" + obj.GetType().FullName
+                    + " id=" + id + " name=" + name + " parent=" + parent + " branch=" + branch
+                    + " roster=" + RosterCounts(obj));
+            }
+            catch (Exception ex)
+            {
+                Log("[BRANCH-PROBE] candidate log failed " + path + ": " + ex.Message);
+            }
+        }
+
+        private static string FirstNonEmpty(object obj, string[] names)
+        {
+            foreach (string name in names)
+            {
+                string value = SafeString(GetMemberValue(obj, name));
+                if (!string.IsNullOrEmpty(value)) return value;
+            }
+            return "";
+        }
+
+        private static string RosterCounts(object obj)
+        {
+            List<string> parts = new List<string>();
+            foreach (string name in new[] { "npcBigElders", "npcElders", "npcInherit", "npcIn", "npcOut", "npcOuter", "members", "npcMembers" })
+            {
+                object v = GetMemberValue(obj, name);
+                int count;
+                if (TryGetCollectionCount(v, out count)) parts.Add(name + "=" + count);
+            }
+            return string.Join(",", parts.ToArray());
         }
 
 
@@ -587,7 +799,7 @@ namespace MOD_SNs4Ii
 
         private static object FindSchoolBuildDataById(string schoolId)
         {
-            // v10：先走實測已知正解路徑。v6/v7 已證明資料在 playerUnit.data.school/_school.buildData。
+            // v11：先走實測已知正解路徑。v6/v7 已證明資料在 playerUnit.data.school/_school.buildData。
             // 不要先全域掃描；Il2Cpp wrapper 物件圖很容易因 depth/seen/初始化狀態漏掉。
             try
             {

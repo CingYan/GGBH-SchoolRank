@@ -37,13 +37,20 @@
 
 如果找不到宗門名冊資料，會退回舊版 per-unit 職位探測流程，並在 log 裡輸出可用欄位供下一版修正。
 
-### 分舵限制
+### 分舵偵測
 
-目前邏輯以玩家 `schoolID` 找同宗門 NPC，並改寫玩家當前宗門的主 `buildData` 名冊。若遊戲的「分舵」使用獨立 `buildData`、獨立名冊欄位或另一組分舵 ID，目前版本不會同步改寫分舵名冊；需要先取得分舵 UI / log 裡的資料欄位後再支援。
+目前邏輯以玩家 `schoolID` 找同宗門 NPC，並改寫玩家當前宗門的主 `buildData` 名冊。若遊戲的「分舵」使用獨立 `buildData`、獨立名冊欄位或另一組分舵 ID，目前版本不會同步改寫分舵名冊。
+
+v11 已加入只讀分舵偵測 log，會同步驗證兩條思路：
+
+1. 從同宗門 NPC 的 `school / branch / hall / area / parent / build / name` 類欄位判斷是否有分舵 ID 或分舵名稱。
+2. 從 `g.world` / `g.data` 掃描疑似 school/buildData 候選，列出路徑、ID、名稱、parent/branch 欄位與 roster count。
+
+這版只輸出 `[BRANCH-PROBE]` 診斷資訊，不會改寫分舵資料。取得分舵頁面 log 後，再決定要不要做「每個分舵獨立整編」。
 
 ## 🧪 目前狀態
 
-- 版本：`v10`
+- 版本：`v11`
 - 命名空間 / AssemblyName：`MOD_SNs4Ii`
 - 已建立 MelonLoader MOD 架構
 - 已實作同宗門 NPC 掃描、玩家排除、排序與名冊寫入流程
@@ -54,8 +61,10 @@
 
 第一次測試請打開 MelonLoader console，確認是否出現：
 
-- `[SchoolRank v10] === Init done ===`
+- `[SchoolRank v11] === Init done ===`
 - `[ENUM] SchoolPostType=...`
+- `[BRANCH-PROBE] start ...`
+- `[BRANCH-PROBE] candidate ...`
 - `[ROSTER] found schoolData ...`
 - `[ROSTER] rewrite ... ok=... counts=...`
 - `[RANK] done ...`
